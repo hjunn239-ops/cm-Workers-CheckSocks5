@@ -1,0 +1,70 @@
+name: Deploy edgetunnel (cross-repo)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required secrets exist
+        run: |
+          if [ -z "${{ secrets.ADMIN }}" ]; then echo "ADMIN secret is missing - add it in this repo: Settings > Secrets and variables > Actions"; exit 1; fi
+          if [ -z "${{ secrets.KEY }}" ]; then echo "KEY secret is missing - add it in this repo: Settings > Secrets and variables > Actions"; exit 1; fi
+          echo "secrets ok"
+      - name: Checkout edgetunnel source
+        uses: actions/checkout@v4
+        with:
+          repository: hjunn239-ops/edgetunnel
+          path: edgetunnel
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install wrangler
+        run: npm install -g wrangler@4
+      - name: Ensure KV namespace edgetunnel-kv exists
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler kv namespace create edgetunnel-kv || true
+          KV_ID=$(wrangler kv namespace list | python3 -c "import sys, json; data = json.load(sys.stdin); print([x['id'] for x in data if x['title'] == 'edgetunnel-kv'][0])")
+          if [ -z "$KV_ID" ]; then echo "could not determine KV id"; exit 1; fi
+          echo "KV_ID=$KV_ID" >> "$GITHUB_ENV"
+          echo "KV namespace id: $KV_ID"
+      - name: Write wrangler.toml with KV id
+        run: |
+          cat > edgetunnel/wrangler.toml <<EOF
+          name = "v20251104"
+          main = "_worker.js"
+          compatibility_date = "2025-11-04"
+          keep_vars = true
+
+          [[kv_namespaces]]
+          binding = "KV"
+          id = "${KV_ID}"
+          EOF
+          cat edgetunnel/wrangler.toml
+      - name: Deploy worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd edgetunnel
+          wrangler deploy
+      - name: Set ADMIN secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_VALUE: ${{ secrets.ADMIN }}
+        run: |
+          cd edgetunnel
+          printf '%s' "$ADMIN_VALUE" | wrangler secret put ADMIN
+      - name: Set KEY secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KEY_VALUE: ${{ secrets.KEY }}
+        run: |
+          cd edgetunnel
+          printf '%s' "$KEY_VALUE" | wrangler secret put KEY
