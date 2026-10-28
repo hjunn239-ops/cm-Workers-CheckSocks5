@@ -1,0 +1,90 @@
+name: Bisect edgetunnel 1101
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bisect:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      KV_ID: "36a0dd9a1de1478fb6f52a84ba8bba6c"
+    steps:
+      - name: Checkout edgetunnel source (current debug build)
+        uses: actions/checkout@v4
+        with:
+          repository: hjunn239-ops/edgetunnel
+          path: src
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install wrangler
+        run: npm install -g wrangler@4
+      - name: T1 hello world, no bindings
+        run: |
+          mkdir -p t1 && cd t1
+          printf 'export default { async fetch() { return new Response("T1-OK"); } };\n' > _worker.js
+          printf 'name = "et-t1"\nmain = "_worker.js"\ncompatibility_date = "2025-11-04"\n' > wrangler.toml
+          wrangler deploy
+          sleep 3
+          echo "T1 result:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t1.hjunn239.workers.dev/ | head -c 300
+          echo
+      - name: T2 hello + KV binding
+        run: |
+          mkdir -p t2 && cd t2
+          cat > _worker.js <<'JS'
+          export default { async fetch(request, env) { try { await env.KV.put('probe', 'kv-ok'); const v = await env.KV.get('probe'); return new Response('T2-' + v); } catch (e) { return new Response('T2-ERR ' + (e && e.stack || e)); } } };
+          JS
+          printf 'name = "et-t2"\nmain = "_worker.js"\ncompatibility_date = "2025-11-04"\n\n[[kv_namespaces]]\nbinding = "KV"\nid = "%s"\n' "$KV_ID" > wrangler.toml
+          wrangler deploy
+          sleep 3
+          echo "T2 result:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t2.hjunn239.workers.dev/ | head -c 300
+          echo
+      - name: T3 full edgetunnel code + KV + plain vars
+        run: |
+          mkdir -p t3 && cp ../src/_worker.js t3/_worker.js && cd t3
+          printf 'name = "et-t3"\nmain = "_worker.js"\ncompatibility_date = "2025-11-04"\nkeep_vars = true\n\n[[kv_namespaces]]\nbinding = "KV"\nid = "%s"\n\n[vars]\nADMIN = "testpass123"\nKEY = "testkey1234567890abcdef"\n' "$KV_ID" > wrangler.toml
+          wrangler deploy
+          sleep 3
+          echo "T3 root:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t3.hjunn239.workers.dev/ | head -c 500
+          echo
+          echo "T3 login:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t3.hjunn239.workers.dev/login | head -c 500
+          echo
+      - name: T3b same worker, ADMIN/KEY delivered as secrets
+        env:
+          ADMIN_VALUE: ${{ secrets.ADMIN }}
+          KEY_VALUE: ${{ secrets.KEY }}
+        run: |
+          cd t3
+          printf '%s' "$ADMIN_VALUE" | wrangler secret put ADMIN
+          printf '%s' "$KEY_VALUE" | wrangler secret put KEY
+          sleep 3
+          echo "T3b root:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t3.hjunn239.workers.dev/ | head -c 500
+          echo
+          echo "T3b login:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t3.hjunn239.workers.dev/login | head -c 500
+          echo
+      - name: T4 full code, fetch stubbed (module init only)
+        run: |
+          mkdir -p t4 && cp ../src/_worker.js t4/_worker.js && cd t4
+          python3 - <<'PY'
+          s = open('_worker.js', encoding='utf-8').read()
+          old = 'return await __orig.fetch(request, env, ctx);'
+          assert old in s, 'wrapper line not found - src is not the debug build'
+          s = s.replace(old, 'return new Response("T4-INIT-OK");')
+          open('_worker.js', 'w', encoding='utf-8').write(s)
+          print('stubbed ok')
+          PY
+          printf 'name = "et-t4"\nmain = "_worker.js"\ncompatibility_date = "2025-11-04"\nkeep_vars = true\n\n[[kv_namespaces]]\nbinding = "KV"\nid = "%s"\n\n[vars]\nADMIN = "testpass123"\nKEY = "testkey1234567890abcdef"\n' "$KV_ID" > wrangler.toml
+          wrangler deploy
+          sleep 3
+          echo "T4 root:"
+          curl -s --max-time 10 -w "\nHTTP:%{http_code}\n" https://et-t4.hjunn239.workers.dev/ | head -c 500
+          echo
